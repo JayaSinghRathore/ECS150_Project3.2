@@ -140,8 +140,11 @@ int fs_umount(void)
 
 int fs_info(void)
 {
-    if (!fs_mounted)
+    // Defensive: ensure the file system is mounted and FAT is allocated
+    if (!fs_mounted || fat == NULL)
         return -1;
+
+    // Print required file system information in the exact expected format
     printf("FS Info:\n");
     printf("total_blk_count=%u\n", sb.total_blocks);
     printf("fat_blk_count=%u\n", sb.fat_blocks);
@@ -149,12 +152,14 @@ int fs_info(void)
     printf("data_blk=%u\n", sb.data_index);
     printf("data_blk_count=%u\n", sb.data_count);
 
+    // Count free FAT entries (entries with value 0, skipping index 0)
     size_t free_fat = 0;
-    for (size_t i = 1; i <= sb.data_count; ++i)
+for (size_t i = 1; i < sb.data_count; ++i)
         if (fat[i] == 0)
             free_fat++;
     printf("fat_free_ratio=%zu/%u\n", free_fat, sb.data_count);
 
+    // Count free root directory entries (filename[0] == '\0')
     size_t free_root = 0;
     for (size_t i = 0; i < FS_FILE_MAX_COUNT; ++i)
         if (root[i].filename[0] == '\0')
@@ -355,4 +360,3 @@ int fs_write(int fd, void *buf, size_t count)
         re->size = fd_table[fd].offset;
     return bytes_written;
 }
-// test update
