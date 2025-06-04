@@ -1,12 +1,13 @@
 # Compiler and flags
 CC      := gcc
 CFLAGS  := -Wall -Wextra -Werror -I.
+AR      := ar
+ARFLAGS := rcs
 
 # Source and object files
 SRCS    := fs.c disk.c
 OBJS    := $(SRCS:.c=.o)
-
-# Target library
+DEPS    := $(SRCS:.c=.d)
 LIB     := libfs.a
 
 .PHONY: all clean
@@ -14,10 +15,12 @@ LIB     := libfs.a
 all: $(LIB)
 
 $(LIB): $(OBJS)
-	ar rcs $@ $^
+	$(AR) $(ARFLAGS) $@ $^
+
+-include $(DEPS)
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -c $< -o $@
 
 clean:
-	rm -f $(OBJS) $(LIB)
+	rm -f $(OBJS) $(LIB) $(DEPS)

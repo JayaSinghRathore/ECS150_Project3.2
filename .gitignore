@@ -1,0 +1,12 @@
+# Ignore build artifacts and temporary files
+*.o
+*.d
+*.x
+*.a
+*.out
+*.fs
+*.txt
+*~
+*.swp
+core
+.DS_Store

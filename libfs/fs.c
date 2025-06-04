@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-
 #include "disk.h"
 #include "fs.h"
 
@@ -40,7 +39,6 @@ static struct root_entry root[FS_FILE_MAX_COUNT];
 static struct fd_entry fd_table[FS_OPEN_MAX_COUNT];
 static int fs_mounted = 0;
 
-// Helper: find root entry by filename
 static int find_root(const char *filename) {
     for (int i = 0; i < FS_FILE_MAX_COUNT; ++i)
         if (strncmp(root[i].filename, filename, FS_FILENAME_LEN) == 0)
@@ -48,7 +46,6 @@ static int find_root(const char *filename) {
     return -1;
 }
 
-// Helper: find free root entry
 static int find_free_root(void) {
     for (int i = 0; i < FS_FILE_MAX_COUNT; ++i)
         if (root[i].filename[0] == '\0')
@@ -56,7 +53,6 @@ static int find_free_root(void) {
     return -1;
 }
 
-// Helper: find free FAT entry (first-fit, skip 0)
 static uint16_t find_free_fat(void) {
     for (uint16_t i = 1; i <= sb.data_count; ++i)
         if (fat[i] == 0)
@@ -64,12 +60,19 @@ static uint16_t find_free_fat(void) {
     return 0;
 }
 
-// Helper: find free fd entry
 static int find_free_fd(void) {
     for (int i = 0; i < FS_OPEN_MAX_COUNT; ++i)
         if (!fd_table[i].used)
             return i;
     return -1;
+}
+
+static void persist_fat(void) {
+    for (size_t i = 0; i < sb.fat_blocks; ++i)
+        block_write(1 + i, ((uint8_t*)fat) + i * BLOCK_SIZE);
+}
+static void persist_root(void) {
+    block_write(sb.root_index, root);
 }
 
 int fs_mount(const char *diskname)
@@ -92,8 +95,8 @@ int fs_mount(const char *diskname)
         block_disk_close();
         return -1;
     }
-    size_t fat_entries = sb.data_count + 1;
-    fat = malloc(fat_entries * sizeof(uint16_t));
+    size_t fat_bytes = sb.fat_blocks * BLOCK_SIZE;
+    fat = malloc(fat_bytes);
     if (!fat) {
         block_disk_close();
         return -1;
@@ -124,12 +127,8 @@ int fs_umount(void)
     for (int i = 0; i < FS_OPEN_MAX_COUNT; ++i)
         if (fd_table[i].used)
             return -1;
-    for (size_t i = 0; i < sb.fat_blocks; ++i) {
-        if (block_write(1 + i, ((uint8_t*)fat) + i * BLOCK_SIZE) < 0)
-            return -1;
-    }
-    if (block_write(sb.root_index, root) < 0)
-        return -1;
+    persist_fat();
+    persist_root();
     free(fat);
     fat = NULL;
     fs_mounted = 0;
@@ -140,32 +139,38 @@ int fs_umount(void)
 
 int fs_info(void)
 {
-    // Defensive: ensure the file system is mounted and FAT is allocated
     if (!fs_mounted || fat == NULL)
         return -1;
-
-    // Print required file system information in the exact expected format
     printf("FS Info:\n");
     printf("total_blk_count=%u\n", sb.total_blocks);
     printf("fat_blk_count=%u\n", sb.fat_blocks);
     printf("rdir_blk=%u\n", sb.root_index);
     printf("data_blk=%u\n", sb.data_index);
     printf("data_blk_count=%u\n", sb.data_count);
-
-    // Count free FAT entries (entries with value 0, skipping index 0)
     size_t free_fat = 0;
-for (size_t i = 1; i < sb.data_count; ++i)
+    for (size_t i = 1; i <= sb.data_count; ++i)
         if (fat[i] == 0)
             free_fat++;
     printf("fat_free_ratio=%zu/%u\n", free_fat, sb.data_count);
-
-    // Count free root directory entries (filename[0] == '\0')
     size_t free_root = 0;
     for (size_t i = 0; i < FS_FILE_MAX_COUNT; ++i)
         if (root[i].filename[0] == '\0')
             free_root++;
     printf("rdir_free_ratio=%zu/%d\n", free_root, FS_FILE_MAX_COUNT);
+    return 0;
+}
 
+int fs_ls(void)
+{
+    if (!fs_mounted)
+        return -1;
+    printf("FS Ls:\n");
+    for (int i = 0; i < FS_FILE_MAX_COUNT; ++i) {
+        if (root[i].filename[0] != '\0') {
+            printf("file: %s, size: %u, data_blk: %u\n",
+                   root[i].filename, root[i].size, root[i].first_data_index);
+        }
+    }
     return 0;
 }
 
@@ -186,6 +191,7 @@ int fs_create(const char *filename)
     root[idx].filename[FS_FILENAME_LEN - 1] = '\0';
     root[idx].size = 0;
     root[idx].first_data_index = FAT_EOC;
+    persist_root();
     return 0;
 }
 
@@ -206,20 +212,8 @@ int fs_delete(const char *filename)
         b = next;
     }
     memset(&root[idx], 0, sizeof(struct root_entry));
-    return 0;
-}
-
-int fs_ls(void)
-{
-    if (!fs_mounted)
-        return -1;
-    printf("FS Ls:\n");
-    for (int i = 0; i < FS_FILE_MAX_COUNT; ++i) {
-        if (root[i].filename[0] != '\0') {
-            printf("file: %s, size: %u, data_blk: %u\n",
-                   root[i].filename, root[i].size, root[i].first_data_index);
-        }
-    }
+    persist_fat();
+    persist_root();
     return 0;
 }
 
@@ -303,8 +297,6 @@ int fs_write(int fd, void *buf, size_t count)
     struct root_entry *re = &root[fd_table[fd].root_index];
     size_t offset = fd_table[fd].offset;
     size_t bytes_written = 0;
-
-    // Allocate first block if needed
     if (re->first_data_index == FAT_EOC && count > 0) {
         uint16_t new_block = find_free_fat();
         if (new_block == 0)
@@ -312,8 +304,6 @@ int fs_write(int fd, void *buf, size_t count)
         fat[new_block] = FAT_EOC;
         re->first_data_index = new_block;
     }
-
-    // Find the block and offset to start writing
     uint16_t block_idx = re->first_data_index;
     size_t skip = offset / BLOCK_SIZE;
     uint16_t prev = FAT_EOC;
@@ -329,7 +319,6 @@ int fs_write(int fd, void *buf, size_t count)
         prev = block_idx;
         block_idx = fat[block_idx];
     }
-
     while (bytes_written < count) {
         if (block_idx == FAT_EOC) {
             uint16_t new_block = find_free_fat();
@@ -358,5 +347,21 @@ int fs_write(int fd, void *buf, size_t count)
     fd_table[fd].offset += bytes_written;
     if (fd_table[fd].offset > re->size)
         re->size = fd_table[fd].offset;
+    persist_fat();
+    persist_root();
     return bytes_written;
+}
+
+int fs_info_full(void)
+{
+    if (!fs_mounted)
+        return -1;
+    fs_info();
+    for (int i = 0; i < FS_FILE_MAX_COUNT; ++i) {
+        if (root[i].filename[0] != '\0') {
+            printf("file: %s, size: %u, data_blk: %u\n",
+                   root[i].filename, root[i].size, root[i].first_data_index);
+        }
+    }
+    return 0;
 }
